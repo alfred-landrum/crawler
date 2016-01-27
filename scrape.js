@@ -23,8 +23,9 @@ function parse(body, url) {
     // only gif, png, and jpg files
     var exts = ['.gif','.png','.jpg']
     var imgext = function(url) {
+        var pathname = urlmod.parse(url).pathname;
         return _.any(exts, function(ext) {
-            return url.endsWith(ext)
+            return pathname.endsWith(ext)
         });
     }
 

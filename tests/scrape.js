@@ -28,6 +28,7 @@ var testdata = {
         <img src="//server.abs/image2.gif">
         <img src="/path/image3.gif">
         <img src="path/image4.gif">
+        <img src="https://server.abs/foo.php?whatever=image5.gif">
         <a href="https://server.abs/link1">
         <a href="//server.abs/link2">
         <a href="/path/link3">
