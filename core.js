@@ -61,7 +61,9 @@ function scrape_and_store(job_id, node) {
 // multiple workers race enqueueing the same node. Not sure how to
 // best avoid that while still ensuring idempotency.
 function enqueue_scrapes(job_id, urls, height, max_height) {
-    return store.calculate_already_scheduled(job_id, urls, height)
+    // We dont need to enqueue nodes that have already been processed,
+    // or already on the queue.
+    return store.intersection_with_nodes_scheduled(job_id, urls, height)
     .then(function(already) {
         stats.worker_schedule_avoid += already.length;
         var remaining = _.difference(urls, already);
@@ -76,9 +78,12 @@ function enqueue_scrapes(job_id, urls, height, max_height) {
                 max_height: max_height,
             }
         });
-        return queue.enqueue_tasks(tasks)
+        return store.prequeue_nodes(job_id, remaining, height)
         .then(function() {
-            return store.mark_nodes_scheduled(job_id, remaining, height);
+            return queue.enqueue_tasks(tasks);
+        })
+        .then(function() {
+            return store.postqueue_nodes(job_id, remaining, height);
         });
     });
 }
