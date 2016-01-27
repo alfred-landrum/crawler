@@ -12,8 +12,9 @@ var redis;
 // Redis schema
 //
 // 2 sets are used to track node processing:
-// - after a node scrape task is put in the queue, the node is
-//   is recorded in the node-scheduled set.
+// - just before a node scrape task is enqueued, the node is put in the
+//   prequeue set.
+// - after a node scrape task is enqueued, it is added to the node-scheduled set.
 // - when a node has been scraped, either actually downloaded, or effectively
 //   scraped because its url has been handled previously, the node is added
 //   to the node-done set.
@@ -25,6 +26,7 @@ var redis;
 // job-start, job-done, and images sets. The other sets (node-done, node-scheduled,
 // and links) will have a much smaller expiration time set (~2 mins).
 
+function preq_key(job_id) { return 'crawler:' + job_id + ':node-prequeued'; }
 function sched_key(job_id) { return 'crawler:' + job_id + ':node-scheduled'; }
 function done_key(job_id) { return 'crawler:' + job_id + ':node-done'; }
 function links_key(job_id) { return 'crawler:' + job_id + ':links'; }
@@ -34,25 +36,35 @@ function job_done_key(job_id) { return 'crawler:' + job_id + ':job-done'; }
 
 function url_val(url, height) { return 'height:' + height + ':url:' + url; }
 
-// Since we always add to node-scheduled before adding to node-done,
-// we must check node-done first to make the comparison meaningful.
-function is_job_finished(job_id) {
+// Return a point-in-time snapshot of the count of done, prequeued, and scheduled.
+function get_node_sets_counts(job_id) {
     var done, scheduled;
     return redis.multi()
-    .scard(done_key(job_id))
+    .scard(preq_key(job_id))
     .scard(sched_key(job_id))
+    .scard(done_key(job_id))
     .exec()
     .then(function(result) {
         // see ioredis 'multi' for result format info.
-        var done = result[0][1];
-        var scheduled = result[1][1];
-        // Comparing done & scheduled:
-        // - during lifetime of scraping job, done < scheduled
-        // - end of job is really when done === scheduled
-        // - during clean below, we make sure to expire scheduled before done,
-        //   so that if this check is made after cleanup for some reason,
-        //   it will still report job as finished.
-        return done >= scheduled;
+        return {
+            prequeued: result[0][1],
+            scheduled: result[1][1],
+            done: result[2][1],
+        };
+    });
+}
+
+// Resolves to true if the crawling job has finished processing all
+// possible nodes.
+// - during lifetime of scraping job, done < (scheduled + prequeued)
+// - end of job is when done === scheduled
+// - during clean below, we make sure to expire scheduled before done,
+//   so that if this check is made after cleanup for some reason,
+//   it will still report job as finished.
+function is_job_finished(job_id) {
+    return get_node_sets_counts(job_id)
+    .then(function(result) {
+        return result.done >= result.prequeued;
     });
 }
 
@@ -97,14 +109,38 @@ function clean_job(job_id) {
         // a scrape task message is duplicated by SQS. We do these serially
         // (via each instead of map) so that the check in is_job_finished
         // will be correct even if it runs mid-expiration.
-        var keys = [sched_key(job_id), done_key(job_id), links_key(job_id)];
+        var keys = [
+            preq_key(job_id),
+            sched_key(job_id),
+            done_key(job_id),
+            links_key(job_id),
+        ];
         return Promise.each(keys, function(key) {
             return redis.expire(key, 2 * conf.get('sqs_visibility_secs'));
         });
     });
 }
 
+
 function get_active_status(job_id) {
+    return get_node_sets_counts(job_id)
+    .then(function(counts) {
+        if (counts.scheduled === 0) {
+            // non-existent job!
+            return null;
+        }
+        return redis.scard(images_key(job_id))
+        .then(function(images) {
+            return {
+                job_id: job_id,
+                pages_scanned: counts.done,
+                pages_queued: counts.prequeued - counts.done,
+                images: images,
+                finished: (counts.prequeued === counts.done),
+            };
+        });
+    })
+
     var completed, scheduled, images;
     return redis.scard(done_key(job_id))
     .then(function(n) {
@@ -113,23 +149,12 @@ function get_active_status(job_id) {
     })
     .then(function(n) {
         scheduled = n;
-        return redis.scard(images_key(job_id));
-    })
-    .then(function(n) {
-        images = n;
 
         if (scheduled === 0) {
             // non-existent job!
             return null;
         }
 
-        return {
-            job_id: job_id,
-            pages_scanned: completed,
-            pages_queued: scheduled - completed,
-            images: images,
-            finished: (scheduled === completed),
-        };
     });
 }
 
@@ -166,13 +191,16 @@ function new_job(job_id, info) {
 }
 
 // Given a list of urls that we may want to schedule, return a list
-// of arrays that are already in the node-scheduled set.
+// of arrays that are already in the node-scheduled set. Since we
+// never remove nodes from node-scheduled during the crawl, this
+// also considers nodes that have already been fully processed (and are
+// hence in the node-done set).
 //
 // note: redis docs say sinter is O(N) on smallest set,
 // while sdiff is O(N) on total elements in all sets. Hence
 // we use sinter here and then diff on these results in core,
 // since node-scheduled will be much larger than urls here.
-function calculate_already_scheduled(job_id, urls, height) {
+function intersection_with_nodes_scheduled(job_id, urls, height) {
     if (urls.length === 0) {
         return Promise.resolve([]);
     }
@@ -199,8 +227,17 @@ function calculate_already_scheduled(job_id, urls, height) {
     });
 }
 
-// Add the list of urls at the given height to the node-scheduled set.
-function mark_nodes_scheduled(job_id, urls, height) {
+function prequeue_nodes(job_id, urls, height) {
+    if (urls.length === 0) {
+        return Promise.resolve();
+    }
+    var values = urls.map(function(url) {
+        return url_val(url, height);
+    });
+    return redis.sadd(preq_key(job_id), values);
+}
+
+function postqueue_nodes(job_id, urls, height) {
     if (urls.length === 0) {
         return Promise.resolve();
     }
@@ -309,8 +346,9 @@ module.exports = {
     is_job_finished: is_job_finished,
     clean_job: clean_job,
     get_status: get_status,
-    calculate_already_scheduled: calculate_already_scheduled,
-    mark_nodes_scheduled: mark_nodes_scheduled,
+    intersection_with_nodes_scheduled: intersection_with_nodes_scheduled,
+    prequeue_nodes: prequeue_nodes,
+    postqueue_nodes: postqueue_nodes,
     check_and_update_node_done: check_and_update_node_done,
     mark_node_done: mark_node_done,
     save_images: save_images,
