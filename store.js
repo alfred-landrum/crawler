@@ -11,8 +11,8 @@ var redis;
 
 // Redis schema
 //
-// 2 sets are used to track node processing:
-// - just before a node scrape task is enqueued, the node is put in the
+// 3 sets are used to track node processing:
+// - just before a node scrape task is enqueued, the node is added to the
 //   prequeue set.
 // - after a node scrape task is enqueued, it is added to the node-scheduled set.
 // - when a node has been scraped, either actually downloaded, or effectively
