@@ -68,6 +68,8 @@ function is_job_finished(job_id) {
     });
 }
 
+// All operations and sub-operations must be idempotent, since this is
+// triggered via an SQS message.
 function clean_job(job_id) {
     function ensure_done_marker() {
         // We need to ensure that if we're restarting this clean task due to

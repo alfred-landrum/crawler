@@ -88,6 +88,8 @@ function enqueue_scrapes(job_id, urls, height, max_height) {
     });
 }
 
+// All operations and sub-operations must be idempotent, since this is
+// triggered via an SQS message.
 function process_node(job_id, node, max_height) {
 
     function scrape_node() {
