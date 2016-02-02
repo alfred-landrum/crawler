@@ -57,7 +57,7 @@ function get_node_sets_counts(job_id) {
 // Resolves to true if the crawling job has finished processing all
 // possible nodes.
 // - during lifetime of scraping job, done < (scheduled + prequeued)
-// - end of job is when done === scheduled
+// - end of job is when done === prequeued.
 // - during clean below, we make sure to expire scheduled before done,
 //   so that if this check is made after cleanup for some reason,
 //   it will still report job as finished.
@@ -68,8 +68,7 @@ function is_job_finished(job_id) {
     });
 }
 
-// All operations and sub-operations must be idempotent, since this is
-// triggered via an SQS message.
+// All operations and sub-operations are intentionally idempotent.
 function clean_job(job_id) {
     function ensure_done_marker() {
         // We need to ensure that if we're restarting this clean task due to
@@ -118,6 +117,10 @@ function clean_job(job_id) {
             links_key(job_id),
         ];
         return Promise.each(keys, function(key) {
+            // The 2 * visibility expiration is based on a visibility epoch
+            // on the order of 10's of seconds, and to ensure that this
+            // stays around beyond the likely point of SQS message duplication:
+            // https://aws.amazon.com/articles/Amazon-SQS/1343#09
             return redis.expire(key, 2 * conf.get('sqs_visibility_secs'));
         });
     });
@@ -128,7 +131,7 @@ function get_active_status(job_id) {
     return get_node_sets_counts(job_id)
     .then(function(counts) {
         if (counts.scheduled === 0) {
-            // non-existent job!
+            // This is a non-existent job, or one that is long since completed.
             return null;
         }
         return redis.scard(images_key(job_id))
@@ -185,7 +188,6 @@ function load_images_if_done(job_id) {
 }
 
 // Store initial creation info for this job.
-// This is not actually used for any job logic.
 function new_job(job_id, info) {
     _.extend(info, {created_at: new Date().toISOString()});
     var value = JSON.stringify(info);

@@ -21,7 +21,7 @@ $ npm install
 $ npm start
 ```
 
-By design, you can dynamically scale up or down by adding or killing instances.
+By design, you can dynamically scale up by dynamically adding more instances. You can easily scale down by killing instances, with no need to worry about a graceful shutdown or the like.
 
 ### Service API
 

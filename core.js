@@ -9,6 +9,9 @@ var Promise = require('bluebird');
 
 var MAX_HEIGHT = 2;
 
+// Note: in a real rollout, I'd have stats like the below
+// fed into something like Statsd or some other statistics
+// aggregation platform.
 var stats = {
     worker_pre_scrape_dupe: 0,
     worker_pre_scrape_parent: 0,
@@ -21,8 +24,8 @@ var stats = {
 // Scrape the images & links for this node's url, and store the results.
 // Images are intentionally stored before the links so that scrape_node
 // can easily tell if we've scraped this url already.
-// XXX: If we error during scraping, we will store an empty links list and record
-// an error stat. We could add some retry logic if desired.
+// No retry logic currently implemented in case of failure, though that's
+// an obvious next feature.
 function scrape_and_store(job_id, node) {
     var images, links;
     var url = node.url;
@@ -58,8 +61,7 @@ function scrape_and_store(job_id, node) {
 // Queue the nodes for the given urls & height for processing.
 // Duplicate scrape tasks can end up on the queue, either because
 // a worker gets killed before marking nodes for scheduling, or because
-// multiple workers race enqueueing the same node. Not sure how to
-// best avoid that while still ensuring idempotency.
+// multiple workers race enqueueing the same node.
 function enqueue_scrapes(job_id, urls, height, max_height) {
     // We dont need to enqueue nodes that have already been processed,
     // or already on the queue.
@@ -88,13 +90,15 @@ function enqueue_scrapes(job_id, urls, height, max_height) {
     });
 }
 
-// All operations and sub-operations must be idempotent, since this is
-// triggered via an SQS message.
+// All operations and sub-operations are idempotent to ensure
+// forward progress if the process crashes, or is killed, while running
+// process_node(). In that case, SQS will eventually make the task visible
+// again, and another process will pick up the task.
 function process_node(job_id, node, max_height) {
 
     function scrape_node() {
         // For leaf nodes, there's no case where we may have already scraped
-        // the page (due to the update_if_link_done check), so just scrape it.
+        // the page (due to the check_and_update_node_done check), so just scrape it.
         if (node.height === 0) {
             return scrape_and_store(job_id, node);
         }
