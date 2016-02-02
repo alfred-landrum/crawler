@@ -61,6 +61,8 @@ A common occurrence is that the same url will show up in nodes at different heig
 Since nodes won't be processed in any guaranteed ordering (due to the SQS task queue), all of the above cases may occur during crawling.
 
 ### Shortcomings, bugs, todos
+Having 3 sets in redis for the nodes isn't great. I started off with 2 sets, done & scheduled. I used sets to help ensure idempotency and to allow O(1) time length checking for each. I added the third set, 'prequeud', as I realized I had a potential race between scheduling nodes & the check for if a crawl is finished (check the github history for info). With more time, I'd investigate different Redis schemas to see if I could avoid 3 copies of the node list in Redis memory.
+
 There's obviously better error handling that could be done. As commented in the code, if an error is thrown during task handling, we will retry the task. This is useful for transient errors, but terrible if the same task is stuck in the queue forever. SQS has a dead letter queue feature that could be useful for this, but I haven't implemented it.
 
 The default request and SQS message visibility timeouts are set such that there's a reasonable chance at downloading and parsing the page before SQS makes the scrape task visible again. However, that's no guarantee: the request timeout doesn't necessarily cover all network related timeouts (dns lookup, TCP connection establishment, slow server data delivery).
